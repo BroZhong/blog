@@ -1,0 +1,509 @@
+---
+title: Claude Code 设计哲学
+date: '2026-01-29'
+tags: ['Claude Code', 'AI Agent', '软件工程']
+draft: false
+summary: 拆解 Claude Code 的 Agentic Loop、Bash 工具接口、Todo、SubAgents 和 Skills，理解它为什么能用极简循环完成复杂编码任务。
+---
+
+## 引言：为什么 Claude Code 值得研究？
+
+- 从我个人的体验上说，随着 AI Coding 的不断发展，AI 已经可以端到端地完成需求了。使用 Claude Code 后，很多时候不需要我做细致的任务拆解，我只负责给它输入输出的样例（业务需求和验证方案）和架构设计（技术需求），它就能很好地完成代码编写并且自动写样例测试并不断修正，大约 70% 的情况下我 review 代码后不用任何修改就可以直接提交。这让我好奇为什么这个命令行 Agent 可以表现得这么好？它的架构设计是怎么样的？
+
+- 在 Claude Code 出现之前，大家都在使用 LangChain、LangGraph 等框架，都在通过复杂编排的方式构建 Agent，从而保证业务运行的稳定性。但是 Claude Code 的本质只是一个极简的循环，为什么这个架构设计在 Coding 场景可以取得这么好的效果？
+
+本文将揭示 Claude Code 背后的核心洞察：**模型即 Agent，代码只是给它行动的机会。**
+
+---
+
+## 一、核心架构：Agentic Loop
+
+![Claude Code 设计哲学 插图 1](/static/images/blog/claude-code-design-philosophy-01.png)
+
+在 Claude Code 的官网上放着这样一张图，说明 Agent 只做三件事：获取上下文、做出行动、验证结果。我们可以用一个简单的 while 循环实现这段逻辑。
+
+```Python
+def agent_loop(messages, tools):
+    # message 即是 context，包含用户 prompt、模型回复、tool 执行结果
+    while True:
+        # 1. 模型推理：决定下一步行动
+        response = model.call(messages, tools)
+
+        # 2. 终止条件：模型返回文本而非工具调用
+        if response.stop_reason != "tool_use":
+            # 结束本次对话，等待用户下一次输入
+            return response.text
+
+        # 3. 执行工具
+        results = execute_tools(response.tool_calls)
+
+        # 4. 更新上下文：将工具结果反馈给模型
+        messages.append(results)
+```
+
+我们以修复一个 bug 为场景看这个循环是如何工作的
+
+| 步骤  | 角色 | 动作                                                       | 伪代码对应                           | 结果                 |
+| ----- | ---- | ---------------------------------------------------------- | ------------------------------------ | -------------------- |
+| **1** | 用户 | "请修复 `src/main.py` 中的拼写错误。"                      | `messages` 接收用户输入              | 循环开始             |
+| **2** | 模型 | **调用工具**：`read_file(path='src/main.py')`              | `response = model.call(...)`         | 模型决定读取文件     |
+| **3** | 框架 | **执行工具**：返回文件内容                                 | `results = execute_tools(...)`       | 文件内容被返回       |
+| **4** | 模型 | **接收结果**：文件内容被添加到 `messages`                  | `messages.append(results)`           | 循环继续             |
+| **5** | 模型 | **调用工具**：`edit_file(path='src/main.py', edits=[...])` | `response = model.call(...)`         | 模型决定修改文件     |
+| **6** | 框架 | **执行工具**：文件修改成功                                 | `results = execute_tools(...)`       | 修改成功的反馈被返回 |
+| **7** | 模型 | **返回文本**："Bug 已修复。"                               | `response.stop_reason != "tool_use"` | 循环终止，任务完成   |
+
+### 为什么不是 DAG？
+
+许多 Agent 框架热衷于构建有向无环图（DAG）来预定义工作流。但 Claude Code 拒绝了这种方法：
+
+| 维度     | Agentic Loop      | DAG（预定义图）   |
+| -------- | ----------------- | ----------------- |
+| 控制方式 | 模型决定下一步    | 代码预定义路径    |
+| 适应性   | 动态应对任何情况  | 只能处理预设场景  |
+| 复杂度   | O\(1\) — 一个循环 | O\(n\) — 节点数量 |
+| 错误处理 | 模型自然回溯      | 需要预设异常路径  |
+
+- 在 Coding 场景中，很难预定义一个工作流，让模型沿着路径走就能解决实际的开发问题，很多时候需要这种 ReAct 循环来不断尝试获得反馈最终完成编码任务。
+
+- 大语言模型的工具调用能力、理解文本的能力已经足够强大。代码也是文本，Coding 本质上就是理解文本，编写文本，在 Coding 场景模型已经吃掉了 DAG 这种代码辅助模型的逻辑。
+
+### 核心洞察
+
+这种“模型即服务”的模式意味着，我们不再需要为每一种可能的边界情况编写复杂的逻辑，而是通过构建一个让模型能够持续与环境交互的**闭环系统**。在这种范式下，模型不再仅仅是一个回答问题的"大脑"，而是一个能够自主决策、执行并根据反馈修正行为的"行动主体"。
+
+这种设计背后有三个关键认知：
+
+1. **模型在训练中已经学会了问题解决、工具使用和推理** — 不需要代码来教它"如何思考"
+
+2. **代码的职责是"让开"** — 提供工具和机会，而不是微观管理
+
+3. **信任模型的判断能力** — 将控制权从代码转移到模型
+
+## 二、Bash is All You Need：通往 Unix 世界的钥匙
+
+在工具设计上，Claude Code 拥抱了 Unix 的经典哲学：**一切皆文件，一切皆可管道**。`bash` 工具即是这个世界的入口，通过 `bash`命令就足以构建一个功能完备的 Agent：
+
+- **文件操作**：利用 `cat`、`grep`、`sed` 等命令进行读写和搜索
+
+- **环境感知**：利用 `ls`、`find`、`ps` 探索系统状态
+
+- **任务执行**：运行编译器、测试框架或运行自己编写的脚本
+
+- **自我递归**：通过执行 `python agent.py "task"`，模型可以不借助任何额外框架，仅凭一行命令就孵化出一个独立的子代理
+
+**Bash 工具定义**：
+
+```Python
+主代理
+  └─ bash: python agent.py "分析架构"
+       └─ 子代理（独立进程，全新历史）
+            ├─ bash: find . -name "*.py"
+            ├─ bash: cat src/main.py
+            └─ 通过 stdout 返回摘要
+
+
+# 极简 Agent 的唯一工具
+TOOL_BASH = {
+    "name": "bash",
+    "description": "执行 shell 命令。支持自我递归调用实现子代理。",
+    "input_schema": {"command": "string"}
+}
+
+# 进程隔离 = 上下文隔离
+# stdout = 结果返回
+# 递归调用 = 无限嵌套
+# $ python agent.py "task description"
+```
+
+**实战场景模拟：代码库探索**
+
+| 步骤  | 角色 | 动作                                                                    | 伪代码对应                           | 结果               |
+| ----- | ---- | ----------------------------------------------------------------------- | ------------------------------------ | ------------------ |
+| **1** | 用户 | "请找出所有包含 'API_KEY' 的文件。"                                     | `messages` 接收用户输入              | 循环开始           |
+| **2** | 模型 | **调用工具**：`bash(command='grep -r "API_KEY" .')`                     | `response = model.call(TOOL_BASH)`   | 模型决定使用 Bash  |
+| **3** | 框架 | **执行工具**：执行 `grep` 命令                                          | `results = execute_tools(...)`       | 命令行输出被返回   |
+| **4** | 模型 | **接收结果**：`config.py: API_KEY = '...'` 等结果被添加到 `messages`    | `messages.append(results)`           | 循环继续           |
+| **5** | 模型 | **返回文本**："已找到 3 个文件，其中包含敏感信息的文件是 `config.py`。" | `response.stop_reason != "tool_use"` | 循环终止，任务完成 |
+
+当然，在实际生产中，Claude Code 提供了更丰富的工具集来提升效率和安全性：
+
+| 工具名称        | 功能描述        | 为什么需要专用工具（而不是只用 bash）                                                                                   |
+| --------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Read            | 读取文件内容    | 直接解析文件格式（PDF、Jupyter Notebook、图片等）；返回结构化数据，无需解析文本输出；支持大文件分段读取；跨平台路径处理 |
+| Write           | 写入文件        | 自动处理文件权限和编码；支持原子性写入；避免重定向符号的 shell 转义问题；与 Read/Edit 配合确保一致性                    |
+| Edit            | 精确编辑文件    | 基于上下文的精确替换（不是正则替换）；自动验证编辑唯一性；防止意外修改；保留原始格式和缩进                              |
+| Glob            | 文件模式匹配    | 专门优化的文件搜索算法；支持复杂的 glob 模式；按修改时间排序；比 find 更高效的代码库搜索                                |
+| Grep            | 内容搜索        | 使用 ripgrep 引擎，性能优于 grep；内置代码类型识别；支持多种输出模式；避免 shell 转义问题                               |
+| Bash            | 执行 shell 命令 | 终端操作的原生接口；处理系统命令（git、npm、docker 等）；持久化 shell 会话；后台任务管理                                |
+| TodoWrite       | 任务管理        | 结构化任务跟踪；与会话状态同步；可视化进度；支持任务依赖关系                                                            |
+| Task            | 启动代理        | 并行执行复杂多步骤任务；专门的代理类型（Explore、Plan 等）；独立上下文和工具访问；后台运行和恢复能力                    |
+| AskUserQuestion | 收集用户输入    | 结构化问题界面；多选/单选支持；选项说明；比 read/readline 更好的 UX                                                     |
+| WebSearch       | 网络搜索        | 直接访问搜索引擎 API；返回结构化结果；自动引用来源；比 curl 解析 HTML 更可靠                                            |
+| WebReader       | 网页抓取        | 自动转换为 Markdown；处理 JavaScript 渲染；图片和链接提取；缓存支持                                                     |
+
+## 三、Todo 工具：结构化规划
+
+尽管模型具备强大的推理能力，但在处理长周期、多步骤的任务时，依然容易陷入"注意力漂移"或"逻辑迷失"。Claude Code 引入了 **Todo 工具链**，将隐性的思考过程转化为显性的数据结构。
+
+通过 `TodoWrite` 工具，模型被强制要求在执行前进行**显式规划**。这种设计的精妙之处在于：
+
+1. **状态可见性**：任务列表被实体化，模型在每一轮对话中都能看到当前的进度板
+
+2. **行为约束**：通过规则（如同一时间只能有一个任务处于 `in_progress`）约束模型的冲动行为，迫使其按部就班
+
+3. **自监督闭环**：Todo 的更新结果作为环境反馈实时回传，形成了模型对自身计划的持续复盘。
+
+在 Manus 的博客中，也讲到这种通过复述操作注意力的机制：通过不断重写待办事项列表，Manus将其目标复述到上下文的末尾，这将全局计划推入模型的近期注意力范围内，避免了"丢失在中间"的问题，并减少了目标不一致。
+
+```Plaintext
+无约束：计划只在模型"脑中"
+    "我先做 A，再做 B，然后 C"（不可见）
+    10 次工具调用后："等等，我在干什么？"
+
+有约束：Todo 让计划显式化
+    [ ] 重构认证模块
+    [>] 添加单元测试         ← 当前在这
+    [ ] 更新文档
+```
+
+**Todo 工具定义**：
+
+```Python
+# TodoWrite 工具定义
+TOOL_TODO = {
+    "name": "TodoWrite",
+    "description": "更新任务列表。必须先规划，再执行。",
+    "input_schema": {"id": "int", "status": "string", "description": "string"}
+}
+
+# 系统提示词中的规划要求
+SYSTEM_PROMPT = """
+...
+规则：在开始复杂任务前，必须使用 TodoWrite 工具进行规划。
+每次工具调用后，你将收到最新的 Todo 状态作为反馈。
+"""
+```
+
+**实战场景模拟：重构任务规划**
+
+| 步骤  | 角色 | 动作                                                                      | 伪代码对应                         | 结果                         |
+| ----- | ---- | ------------------------------------------------------------------------- | ---------------------------------- | ---------------------------- |
+| **1** | 用户 | "请将 `utils.py` 中的同步函数改为异步。"                                  | `messages` 接收用户输入            | 循环开始                     |
+| **2** | 模型 | **调用工具**：`TodoWrite(id=1, status='todo', desc='分析 utils.py 依赖')` | `response = model.call(TOOL_TODO)` | 模型开始规划                 |
+| **3** | 模型 | **调用工具**：`TodoWrite(id=2, status='todo', desc='重构函数为 async')`   | `response = model.call(TOOL_TODO)` | 模型继续规划                 |
+| **4** | 框架 | **执行工具**：返回 Todo 列表状态                                          | `results = execute_tools(...)`     | Todo 列表被添加到 `messages` |
+| **5** | 模型 | **调用工具**：`TodoWrite(id=1, status='in_progress')`                     | `response = model.call(TOOL_TODO)` | 模型开始执行第一步           |
+| **6** | 框架 | **执行工具**：返回 Todo 列表状态                                          | `results = execute_tools(...)`     | 状态更新反馈给模型           |
+| **7** | 模型 | **调用工具**：`bash(command='cat utils.py')`                              | `response = model.call(TOOL_BASH)` | 模型执行第一步的具体操作     |
+
+### 从 Todo 到 Task
+
+在最新的 Claude Code 版本中，将内部的 Todo 升级成了 Task，核心差异在于 todo 项不只是作为一个静态清单，更是作为一个执行单元。不同于 todo 只是存储在内存中，task 列表会作为文件存储在 ～/\.claude/tasks/ 下，从而获得以下优势：
+
+- 多 Session 共享，多个 Claude Code 实例可以同时访问一个 task 清单，分析依赖关系后并行开始任务。并且可以实时广播任务状态
+
+- Task 可以由 SubAgent 完成，这样可以更好地隔离上下文，从而完成更加复杂的任务
+
+## 四、SubAgents：分而治之与上下文隔离
+
+随着任务复杂度的增加，单一对话的上下文会迅速膨胀，导致模型注意力稀释。Claude Code 的解法是 **SubAgents（子代理）机制**。
+
+子代理的核心思想是**分而治之**。主代理像项目经理一样，通过 `Task` 工具将复杂任务派发给专门的子代理。每个子代理拥有：
+
+- **独立的上下文**：子代理看不到主对话的细节，从而避免了信息干扰
+
+- **专门的职责**：如 `explore`（只读探索）、`code`（代码编写）、`plan`（架构规划）
+
+- **受限的工具集**：通过白名单机制，确保子代理各司其职（例如探索代理无法修改文件）
+
+这种**上下文隔离**确保了每个子任务都能在最干净、最专注的环境下执行，最终只将精炼后的总结报告返回给主代理。
+
+**问题场景**：
+
+```Plaintext
+主 Agent 历史：
+  [探索中...] cat file1.py → 500 行
+  [探索中...] cat file2.py → 300 行
+  ... 15 个文件 ...
+  [现在重构...] "等等，file1 里有什么来着？"
+```
+
+**解决方案：子代理**
+
+```Plaintext
+主 Agent 历史：
+  [Task: 探索代码库]
+    → 子代理探索 20 个文件
+    → 返回: "认证在 src/auth/，数据库在 src/models/"
+  [现在用干净的上下文重构]
+```
+
+**Task 工具与子代理执行流程**：
+
+```Python
+# Task 工具定义
+TOOL_TASK = {
+    "name": "Task",
+    "description": "将任务委派给子代理（explore, code, plan）。",
+    "input_schema": {"prompt": "string", "subagent_type": "string"}
+}
+
+def run_task(prompt, agent_type):
+    # 1. 构造专属 system prompt 和工具白名单
+    sub_system = AGENT_CONFIG[agent_type]["system_prompt"]
+    sub_tools = filter_tools(AGENT_CONFIG[agent_type]["tools"])
+
+    # 2. 创建隔离的消息历史
+    sub_messages = [{"role": "user", "content": prompt}]
+
+    # 3. 递归调用 Agentic Loop
+    result_messages = agent_loop(sub_messages, sub_tools)
+
+    # 4. 提取最终总结文本返回给主代理
+    return extract_final_text(result_messages)
+```
+
+**实战场景模拟：大型项目探索**
+
+| 步骤  | 角色   | 动作                                                                     | 伪代码对应                                | 结果                         |
+| ----- | ------ | ------------------------------------------------------------------------ | ----------------------------------------- | ---------------------------- |
+| **1** | 用户   | "请探索整个代码库，并总结认证模块的架构。"                               | `messages` 接收用户输入                   | 循环开始                     |
+| **2** | 主代理 | **调用工具**：`Task(prompt='总结认证模块架构', subagent_type='explore')` | `response = model.call(TOOL_TASK)`        | 主代理委派任务               |
+| **3** | 框架   | **执行工具**：调用 `run_task`                                            | `run_task('总结认证模块架构', 'explore')` | 框架启动子代理               |
+| **4** | 子代理 | **内部循环**：调用 `bash`、`read_file` 等工具，读取 20 个文件            | `agent_loop(sub_messages, sub_tools)`     | 子代理在隔离环境中工作       |
+| **5** | 子代理 | **返回总结**："认证模块使用 OAuth2，核心文件是 `auth.py`。"              | `extract_final_text(...)`                 | 子代理将精炼结果返回给主代理 |
+| **6** | 主代理 | **接收结果**：子代理的总结被添加到 `messages`                            | `messages.append(results)`                | 主代理继续主任务             |
+
+Claude Code 对子代理有严格的**深度限制**——子代理不能生成自己的子代理，防止递归爆炸。
+
+## 五、Skills：知识外化与缓存友好设计
+
+Claude Code 引入了 **Skills 机制**，解决了"模型如何获取领域专业知识"的问题。这标志着从"训练 AI"到"教育 AI"的范式转变。
+
+> **知识外化（Knowledge Externalization）**：将领域知识从模型参数中剥离，存储在人类可读、可编辑的 `SKILL.md` 文件中。
+
+**知识外化的范式转变**：
+
+| 传统方式（微调）   | Skills 方式               |
+| ------------------ | ------------------------- |
+| 知识锁在模型参数里 | 知识存在 SKILL\.md 文件中 |
+| 修改需要训练       | 修改就是编辑文本          |
+| 成本：$10K-$1M\+   | 成本：免费                |
+| 周期：数周         | 周期：即时生效            |
+
+Skills 机制采用了**渐进式披露**的设计：
+
+1. **元数据层**：启动时仅加载技能名称和描述，节省 Token
+
+2. **内容层**：当模型根据描述决定需要某项技能时，再通过 `Skill` 工具动态加载完整的指南和代码示例
+
+3. **缓存友好**：技能内容作为 `tool_result` 追加到对话末尾，而非修改 System Prompt。这种设计确保了之前的 Prompt Cache 依然有效，在长对话中可降低高达 90% 的成本
+
+通过这种方式，开发者无需微调模型，只需编写一份 Markdown 文档，就能让通用模型瞬间变身为 PDF 处理专家或代码审查专家。
+
+**Skill 工具与内容注入**：
+
+```Python
+# Skill 工具定义
+TOOL_SKILL = {
+    "name": "Skill",
+    "description": "加载技能获取专业知识。当任务匹配技能描述时调用。",
+    "input_schema": {"skill_name": "string"}
+}
+
+def run_skill(skill_name):
+    # 1. 从 SKILL.md 文件中读取完整内容
+    content = SkillLoader.get_skill_content(skill_name)
+
+    # 2. 将完整内容作为 tool_result 返回
+    # 关键：内容追加到 messages 末尾，保持 System Prompt 不变，以命中缓存
+    return f"""<skill-loaded name="{skill_name}">
+{content}
+</skill-loaded>
+Follow the instructions in the skill above."""
+```
+
+**SKILL\.md 结构示例**：
+
+```Markdown
+---
+name: code-review
+description: 代码安全审查
+---
+
+# 代码安全审查技能
+
+## 审查清单
+- 检查硬编码的密钥和密码
+- 检查 SQL 注入风险
+- 检查 XSS 漏洞
+...
+```
+
+**实战场景模拟：按需加载专业知识**
+
+| 步骤  | 角色 | 动作                                                      | 伪代码对应                                   | 结果                                        |
+| ----- | ---- | --------------------------------------------------------- | -------------------------------------------- | ------------------------------------------- |
+| **1** | 用户 | "请对 `auth.py` 文件进行安全代码审查。"                   | `messages` 接收用户输入                      | 循环开始                                    |
+| **2** | 模型 | **调用工具**：`Skill(skill_name='code-review')`           | `response = model.call(TOOL_SKILL)`          | 模型识别到需要专业知识                      |
+| **3** | 框架 | **执行工具**：调用 `run_skill`                            | `run_skill('code-review')`                   | 框架加载 `code-review/SKILL.md`             |
+| **4** | 框架 | **返回结果**：`SKILL.md` 的完整内容被包装成 `tool_result` | `return f"<skill-loaded>...</skill-loaded>"` | 包含"安全审查清单"等专业知识被注入上下文    |
+| **5** | 模型 | **接收结果**：模型现在拥有了安全审查的详细步骤和最佳实践  | `messages.append(results)`                   | 循环继续                                    |
+| **6** | 模型 | **调用工具**：`bash(command='grep "password" auth.py')`   | `response = model.call(TOOL_BASH)`           | 模型根据 Skill 指导，开始执行具体的审查步骤 |
+
+---
+
+## 六、缓存与成本优化
+
+### KV Cache 原理
+
+大模型是自回归的：生成每个 token 都要 Attention 之前所有 token。为避免重复计算，提供商实现了 KV Cache：
+
+```Plaintext
+请求 1: [System, User1, Asst1, User2]
+        ←────── 全部计算 ──────→
+
+请求 2: [System, User1, Asst1, User2, Asst2, User3]
+        ←────── 缓存命中 ──────→ ←─ 新计算 ─→
+               (更便宜)            (正常价格)
+```
+
+**缓存命中要求前缀完全相同。**
+
+### 只追加策略
+
+```Python
+# 错误：修改历史
+messages[0]["content"] = updated_prompt  # 缓存失效！
+messages = messages[-10:]  # 滑动窗口，缓存失效！
+
+# 正确：只追加
+messages.append(new_message)  # 前缀不变，缓存命中！
+```
+
+> **把上下文当作只追加日志，而非可编辑文档。**
+
+这也是为什么 Skills 机制将知识作为 `tool_result` 追加到末尾，而非修改 System Prompt 的原因。
+
+---
+
+## 七、安全与透明
+
+### 多层权限系统
+
+Claude Code 通过权限系统实现多层保护：
+
+- 写操作需要明确的允许/拒绝决策
+
+- 危险的 Bash 命令需要确认
+
+- 外部工具使用（MCP/web）需要授权
+
+用户可以配置白名单或"始终允许"规则，在安全性和工作流效率之间取得平衡。
+
+### Diff 优先的工作流
+
+Claude Code 采用 **diff 优先** 的方式展示代码变更：
+
+- 彩色 diff 让变更一目了然
+
+- 鼓励最小化修改
+
+- 便于审查和回滚
+
+这种方法自然地促进了测试驱动开发——Claude 可以运行测试、看到失败、迭代修复，同时保持变更透明可控。
+
+---
+
+## 八、设计心态转变
+
+| 传统思维                    | Agent 思维                   |
+| --------------------------- | ---------------------------- |
+| "如何让系统做 X？"          | "如何让模型能够做 X？"       |
+| "用户说 Y 时应该发生什么？" | "什么能力能帮助处理 Y？"     |
+| "这个任务的工作流是什么？"  | "模型需要什么来想出工作流？" |
+
+**最好的 Agent 代码几乎是无聊的**：简单的循环、清晰的工具定义、干净的上下文管理。魔法不在代码里——在模型里。
+
+正如 Anthropic 工程博客所述：
+
+> "力量来自其**极致的简洁**。当竞争对手追逐多代理群和复杂编排时，Anthropic 构建了一个单线程循环，专注做好一件事——思考、行动、观察、重复。驱动 CS101 while 循环的同一模式，现在驱动着能够重构整个代码库的 Agent。优雅的工程 \+ 约束驱动的设计。
+
+---
+
+## 九、实践清单
+
+### 构建 Agent 时
+
+- [ ] 从最少的工具开始（3\-5 个）
+
+- [ ] 让工具描述清晰、原子化
+
+- [ ] 信任模型的推理能力
+
+- [ ] 按需加载知识，而非预先塞满
+
+- [ ] 保护上下文，隔离噪音
+
+- [ ] 用约束聚焦，而非限制
+
+- [ ] 只追加消息，保持缓存有效
+
+### 避免的陷阱
+
+- [ ] 不要预先指定工作流程
+
+- [ ] 不要构建复杂的决策树
+
+- [ ] 不要让上下文无限增长
+
+- [ ] 不要把所有知识塞进系统提示词
+
+---
+
+## 十、补充资料
+
+如果想要了解 Claude code 相关的基本概念、使用方法、最佳实践等可以查看以下链接：
+
+- https://code\.claude\.com/docs/en/overview
+
+- https://claudecode\.tangshuang\.net/
+
+- https://adocomplete\.com/advent\-of\-claude\-2025/
+
+## 总结
+
+Claude Code 的设计哲学揭示了未来 AI 应用的演进方向：
+
+```Plaintext
+Agent = 模型 + 循环 + 工具
+```
+
+五大支柱共同构建了一个既强大又灵活的编码智能体：
+
+1. **极简的底层循环** — Agentic Loop
+
+2. **万能的系统接口** — Bash is All You Need
+
+3. **显式的规划约束** — Todo 工具链
+
+4. **层级的任务委派** — SubAgents 子代理
+
+5. **模块化的知识注入** — Skills 系统
+
+## 参考资料
+
+- [learn\-claude\-code 项目](https://github.com/shareAI-lab/learn-claude-code)
+
+- [Claude code官网](https://code.claude.com/docs/en/how-claude-code-works)
+
+- [Anthropic Says Don't Build Agents, Build Skills Instead](https://cobusgreyling.substack.com/p/anthropic-says-dont-build-agents)
+
+- https://blog\.promptlayer\.com/claude\-code\-behind\-the\-scenes\-of\-the\-master\-agent\-loop/
+
+- https://www\.anthropic\.com/engineering/advanced\-tool\-use
+
+- https://manus\.im/zh\-tw/blog/Context\-Engineering\-for\-AI\-Agents\-Lessons\-from\-Building\-Manus
+
+---

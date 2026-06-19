@@ -1,0 +1,232 @@
+---
+title: Anthropic 正在定义云端 Agent 的标准
+date: '2026-04-13'
+tags: ['Anthropic', 'AI Agent', '云原生', '架构']
+draft: false
+summary: 从 Managed Agents 出发，拆解 Anthropic 如何用 Session、Harness 和 Sandbox 定义云端 Agent 的运行时结构。
+---
+
+## 一、引言：Agent 上云，比想象中难
+
+2025 年以来，Claude Code、Codex 这类工具已经证明模型可以自主规划和执行多步任务。但"在本地跑一个 Agent"和"在云上为成千上万用户可靠运行 Agent"是两件事。
+
+Anthropic 最初的做法是把所有组件塞进一个容器：编排工具的 harness、执行代码的 sandbox、记录过程的 session。然后问题就来了—— 变更、状态、安全、耦合，做过分布式系统的人对这些都很熟悉。Agent 场景的不同在于：这次变化最快的不是需求或流量，而是执行者即 LLM 本身的能力。
+
+2026 年 4 月，Anthropic 发布了 [Managed Agents](https://www.anthropic.com/engineering/managed-agents)。这篇文章用架构设计的视角拆解他们怎么一步步走到这个设计的，以及背后在下一盘什么棋。
+
+## 二、四个真实的工程困难
+
+### 1. 模型能力不断变化，Harness 的假设会过时
+
+Anthropic 工程博客上反复讨论一个话题：如何为 Agent 设计运行框架（harness）。这里的 harness，就是围绕模型的编排层，负责拼上下文、调用模型、分发工具调用、处理反馈。他们的一个洞察是，harness 编码的是"关于模型不能做什么的假设"，而这些假设会随模型进步而过时。
+
+举个例子：他们发现 Claude Sonnet 4.5 在感知到上下文窗口快用完时，会焦虑地提前结束任务，他们称之为"上下文焦虑"（context anxiety）。于是在 harness 里加了上下文重置机制。但同样的 harness 用在 Claude Opus 4.5 上时，这个行为消失了。上下文重置变成了累赘。
+
+这是一个结构性矛盾：**模型在快速进化，但 harness 里的假设是硬编码的。** 每次模型升级，工程师都要回去审查 harness，看看哪些补丁过时了、哪些约束变成了限制。harness 和模型紧密耦合，就是在用过去的模型能力约束未来的模型。
+
+### 2. Agent 是有状态的
+
+所有组件塞进一个容器，harness、sandbox、session 共享环境。容器挂了，会话就丢了。容器卡死了，工程师得想办法把它"治好"。
+
+用云计算领域的经典比喻说，他们养了一只"宠物"。在 [Pets vs Cattle](https://cloudscaling.com/blog/cloud-computing/the-history-of-pets-vs-cattle/) 的类比里，宠物是有名字的、需要精心照料的个体，你承受不起失去它；牲畜是可互换的，坏了就换一头。Anthropic 的容器变成了宠物：故障时会话丢失，无响应时必须进去修复。
+
+调试更麻烦。单一容器部署，唯一的观测窗口是 WebSocket 事件流，但它分不清是 harness 的 bug、网络丢包还是容器本身挂了，所有故障看起来一样。要排查就得 SSH 进容器，但容器里跑着用户数据，几乎没法调试。
+
+长时间运行的 Agent 天然会积累推理历史、中间结果、任务进度。把这些状态和执行环境绑在一起，就是在给自己挖坑。
+
+### 3. 安全边界模糊
+
+Claude 生成的代码和系统凭证在同一个容器里运行。一次成功的 prompt injection 只需要说服 Claude 去读自己的环境变量。
+
+攻击者拿到 token 后，可以用 API 创建新会话，把恶意任务委托出去。缩小 token 权限范围是一个直觉上的缓解措施，但 Anthropic 指出了更深的问题："限定 token 能做什么"本身也是一个关于模型能力的假设。模型越聪明，一个看似权限很窄的 token 能被利用的方式就越多。
+
+权限收窄是缓解，不是修复。结构性的修复是**让 token 从一开始就不在 Agent 能触及的地方。**
+
+### 4. 环境和 Harness 的耦合
+
+Harness 假设 Claude 要处理的一切（代码仓库、工具、执行环境）都在同一个容器里。
+
+企业客户说"我想让 Claude 操作我们 VPC 里的代码仓库"时，就遇到了麻烦。只能把自己的网络和 Anthropic 对等互联（VPC peering），因为在单体服务场景下：执行环境、需要操作的资源和 Agent 都部署在同一个容器中。
+
+同样的耦合还导致性能问题。每个 Agent 会话都要先启动容器（克隆仓库、启动进程、拉取事件），然后才能开始推理，即使这个会话根本不需要沙箱。所有会话都要为容器启动付出等待时间，直接拉高了 TTFT（Time To First Token），也就是用户从发出请求到看到第一个响应的延迟。
+
+---
+
+四个困难指向变化、状态、安全和耦合。分布式系统、云计算、安全工程领域的人对这些都很熟悉。Agent 场景的独特之处在于放大器不同：传统系统面对的"变化"是需求变、流量变、硬件变；Agent 系统面对的，是执行者本身的能力在变。
+
+## 三、熟悉的问题，熟悉的解法
+
+Anthropic 给出的解法，没有一个是新发明。接口隔离、状态外置、凭证隔离、松耦合，计算机科学几十年来反复用过的方法。但光说"他们用了这些设计模式"会错过真正有意思的部分：**同样的方法，在 Agent 场景下解决的是不同层次的问题。**
+
+### 1. 通过接口隔离变化
+
+不知道未来会变成什么样时，定义一个稳定的接口，把变化封装在后面。UNIX 把所有设备抽象成文件，用 `open()`/`read()`/`write()`/`close()` 统一访问，硬件换了一代又一代，这组接口活了五十年。
+
+![Anthropic 正在定义云端 Agent 的标准 插图 1](/static/images/blog/anthropic-cloud-agent-standard-01.png)
+
+Anthropic 做的结构上一样。他们把 Agent 能触及的所有执行环境（容器沙箱、MCP 服务器、自定义工具）统一抽象成一个接口：
+
+```
+execute(name, input) → string
+```
+
+传入工具名和输入，返回一个字符串。就这么简单。harness 不知道也不关心 sandbox 是一个 Docker 容器、一台远程虚拟机、一部手机，还是一个宝可梦模拟器（这是原文的例子）。它只知道调用 `execute()`，拿回结果。
+
+**但 Agent 场景的特殊性在于：传统接口隔离的是硬件或实现的变化，而这里隔离的是模型能力的变化。**
+
+UNIX 的 `read()` 能活五十年，因为"从设备读数据"这个语义是稳定的，磁带还是 SSD 都一样。Anthropic 赌的是类似的判断：无论未来模型多强，"调用工具，传入参数，拿回结果"这个交互模式是稳定的。模型会更聪明、能操作更多工具，但 `execute(name, input) → string` 的接口形状不需要变。
+
+新模型不再需要某个 harness 特性时（比如上下文重置），不用重写接口，换一个 harness 实现就行。接口在这里是**吸收模型进化的缓冲层**。
+
+### 2. 状态外置与可编程上下文
+
+![Anthropic 正在定义云端 Agent 的标准 插图 2](/static/images/blog/anthropic-cloud-agent-standard-02.png)
+
+把 Agent 从"有状态的宠物"改造成"无状态的牲畜"。做法直接：把状态从进程里拿出来，放到外部存储。Web 应用把 session 外置到 Redis，Kubernetes 把集群状态放进 etcd，都是同一个思路。
+
+Anthropic 把 session 从容器里拿出来，变成独立的、外部的、append-only 事件日志。harness 变成了无状态进程：启动时用 `wake(sessionId)` 拿到会话 ID，用 `getEvents(id)` 读取事件日志，从最后一个事件处恢复，然后继续工作。运行过程中，harness 通过 `emitEvent(id, event)` 把每一步操作写入 session。
+
+容器也是同样的逻辑。从前容器是宠物——挂了要治；现在容器是牲畜——挂了就换。harness 把容器故障当成一个普通的工具调用错误传回给 Claude，如果 Claude 决定重试，用 `provision({resources})` 起一个新的就行。
+
+**Agent 的 session 和传统 session 有本质区别：它不只是恢复状态的备份，而是模型可以主动查询的上下文对象。**
+
+传统 Web session 是被动的键值存储，存个 user_id 下次取出来。Agent 的 session 存的是完整推理历史，而且模型在正常工作时也需要回去翻看。
+
+Agent 场景的难题在于：**上下文窗口有限，但长任务的推理历史不能丢。** 压缩、摘要、裁剪都是不可逆的，很难提前知道哪些 token 未来会被需要。
+
+Anthropic 的解法是让 session 成为可编程的上下文接口。`getEvents()` 允许 harness 按位置选择事件流切片：从上次读到的地方继续，回退到某个时刻看前因，或在某个操作前重读相关上下文。取出的事件还可以在 harness 里做转换（重组上下文提高 prompt cache 命中率、做上下文工程）再喂给 Claude。
+
+**session 负责持久、完整、可查询的存储；harness 负责灵活、可演化的上下文管理。** session 不做不可逆操作，只保证所有历史都在。怎么组织上下文、保留什么丢弃什么，交给 harness。Anthropic 无法预测未来模型需要什么样的上下文工程，所以不在 session 层做这个决策。
+
+### 3. 凭证隔离：给能力，不给 token
+
+安全问题的解法可以概括成一句话：Agent 可以获得访问某个资源的能力，但不应该接触原始凭证。这里的关键不是让 Git 或外部 API "不需要 token"，而是把认证通道放在 Agent 可读取边界之外。Anthropic 用了两种模式：
+
+**第一种，把认证绑定到资源本身。** 以 Git 为例，在沙箱初始化阶段，系统用仓库的 access token 完成代码克隆，并为本地 Git 配置一条认证通道。之后，Agent 在沙箱内执行 `git push` 和 `git pull` 就能正常工作，但它拿到的是"操作这个仓库"的能力，而不是 token 本身。具体实现可以是平台侧的 Git proxy、受控 credential broker 等等；关键点是原始凭证不落在 Agent 可读取的环境变量、文件或 remote URL 里。
+
+**第二种，通过代理和保险库间接访问。** 对于 MCP 等自定义工具，OAuth token 存在一个安全保险库（vault）里。可以把 vault 理解成专门存凭证的服务：它保存 token，并通过策略控制谁能在什么场景下取用。Claude 调用 MCP 工具时，请求不是直接发出去的，而是经过一个专用代理（proxy）。代理根据会话和资源标识，从 vault 里取出对应凭证，代为发起外部调用。Claude 看到的只是"调用工具 → 拿到结果"，中间的认证过程对它完全不可见。harness 自身也不接触任何凭证。
+
+如果用 Kubernetes 类比，这相当于把 Secret 只挂给 proxy 或 credential broker，而不是挂给 Agent 容器。Agent 容器只访问一个受控的本地服务或平台服务；真正的 GitHub token、OAuth token 留在代理进程或外部 vault 里。
+
+这里要防的是**攻击面**。Agent 执行的是模型在运行时生成的代码，可能被 prompt injection 操纵。前面提到过，模型越聪明，权限收窄越靠不住。Anthropic 的选择是让 Agent 根本碰不到凭证，直接消除这条攻击路径。凭证不在沙箱里，模型再聪明也没用。
+
+### 4. 松耦合带来可组合性
+
+解耦之后还有一个额外收益：**组件可以自由组合。** UNIX 管道、微服务拆分，都是同一个故事。Managed Agents 里，解耦带来了两个维度的组合能力：
+![Anthropic 正在定义云端 Agent 的标准 插图 3](/static/images/blog/anthropic-cloud-agent-standard-03.png)
+
+**多个大脑（Many Brains，指 Claude + harness 这一层）。** 一旦 harness 不再绑定在容器里，你可以同时启动很多个 harness 实例，每个都是无状态的，各自连接到不同的 session。扩展"思考能力"就是多起几个进程，不需要多起几个容器。更重要的是，当 harness 不再假设"资源在我旁边"时，客户 VPC 接入的问题也自然解决了——harness 通过网络调用远端的沙箱，和调用本地的没有区别。
+
+**多只手（Many Hands，指 sandbox、MCP server、外部工具等执行环境）。** 因为每个沙箱都是一个 `execute(name, input) → string` 接口，一个 brain 可以同时连接多个沙箱。Claude 可以推理该把工作发到哪个执行环境——在这个容器里跑测试，在那个 MCP 服务器上查数据，在另一个沙箱里编辑文件。而且，因为 hands 和 brain 之间没有绑定关系，brain 之间还可以互相传递 hands。
+
+性能上也有直接收益。容器只在 brain 通过工具调用请求时才创建，不需要沙箱的会话直接开始推理。Anthropic 报告 p50 TTFT 下降约 60%，p95 下降超过 90%。
+
+**Agent 场景的"可组合性"和传统微服务有一个区别：谁来决定怎么组合。**
+
+传统微服务架构里，服务之间的调用链是人设计好的。API Gateway 调 Auth Service，Auth Service 调 User Service，工程师在代码里写死。可以独立部署和扩展，但组合方式是预定义的。
+
+Managed Agents 里，组合是**模型在运行时自主决定**的。Claude 自己判断该把工作发到哪个 sandbox、什么时候需要新的执行环境、是否要把一只手传给另一个 brain。开发者不设计调用链，Agent 根据任务需要动态编排执行环境。
+
+Anthropic 也承认，这对模型的认知能力有要求。同时推理多个执行环境、决定工作分配，比在单个 shell 里操作难得多。他们最初用单容器，就是因为早期模型做不到。模型能力提升后，单容器反而成了瓶颈。架构的天花板应该高于模型的能力，而不是低于它。
+
+### 拼起来：一个云端 Agent 的完整架构
+
+四个决策讲完了，拼回一张图：
+
+![Anthropic 正在定义云端 Agent 的标准 插图 4](/static/images/blog/anthropic-cloud-agent-standard-04.png)
+
+三个核心抽象各自独立，通过一组精简接口连接（这组接口来自工程博客的架构描述，用来解释组件边界，不等同于公开 API）：
+
+| 接口                            | 方向              | 作用                         |
+| ------------------------------- | ----------------- | ---------------------------- |
+| `wake(sessionId)`               | → Harness         | 启动或恢复一个 harness 实例  |
+| `getEvents(id)`                 | Session → Harness | 读取事件流的切片，恢复上下文 |
+| `emitEvent(id, event)`          | Harness → Session | 写入新事件，保持持久记录     |
+| `execute(name, input) → string` | Harness → Sandbox | 调用任意工具或执行环境       |
+| `provision({resources})`        | Harness → Sandbox | 按需创建新的沙箱实例         |
+
+![Anthropic 正在定义云端 Agent 的标准 插图 5](/static/images/blog/anthropic-cloud-agent-standard-05.png)
+
+用一个具体场景走一遍：假设一个 Agent 会话需要修复代码仓库里的一个 bug。
+
+1. 用户发起请求。系统调用 `wake(sessionId)` 启动一个 harness 实例——这是一个无状态进程，启动成本很低
+2. Harness 调用 `getEvents(id)` 从 session log 中拉取该会话的历史事件，拼装出 Claude 需要的上下文
+3. Claude 开始推理。它判断需要一个沙箱来运行代码，于是 harness 调用 `provision({resources})` 创建一个容器，克隆代码仓库，并配置好 Git 的认证通道（Claude 能操作仓库，但碰不到原始 token）
+4. Claude 通过 `execute("bash", "git diff HEAD~1")` 查看最近的改动，通过 `execute("bash", "python -m pytest")` 运行测试，读取报错，修改代码，再次运行测试
+5. 如果中间容器挂了，harness 把它当作工具调用错误传回给 Claude。Claude 决定重试，`provision()` 起一个新容器继续工作——容器是牲畜，不是宠物
+6. 如果 harness 自己挂了，也没关系。新的 harness 实例被 `wake(sessionId)` 唤起，从 session log 中读取所有历史事件，从断点恢复——因为所有状态都在 session 里
+7. 如果 Claude 需要调用外部 API（比如通过 MCP），请求经过代理，代理从 vault 取凭证代为调用
+8. 任务完成，Claude 提交代码。整个过程中，session log 记录了每一步操作，任何组件故障都不会导致数据丢失
+
+**三个抽象各自可以独立故障、独立替换、独立扩展，通过接口连接而不是共享环境耦合。**
+
+---
+
+四个设计决策对应四个经典思想，指向同一个语境：**Agent 系统最大的变量不是需求或流量，而是模型本身。** 接口不变，实现随时替换。
+
+但 Anthropic 为什么要费这么大力气设计一套"能容纳未来所有 harness"的抽象？这不只是工程决策。
+
+## 四、Anthropic 在争夺云端 Agent 的定义权
+
+基于 Anthropic 过去一年多的产品动作，我的判断是：Managed Agents 是 Anthropic 在争夺云端 Agent 基础设施定义权的一步棋。
+
+原文反复用一个词：**meta-harness**。Managed Agents 不规定 Agent 怎么规划任务、管理上下文、重试失败操作——它是一个容纳 harness 的框架：对接口形状有主张，对接口背后运行什么不限定。
+
+类比是操作系统。操作系统要为"尚未被构想出的程序"设计抽象，所以只提供进程、文件、套接字这类稳定层。Anthropic 把 Agent 运行时拆成 Session、Harness、Sandbox，假设这三个抽象能容纳未来围绕 Claude 构建的各种 Agent 系统。Claude Code 是一种 harness，以后可能有专门做代码审查、数据分析、安全审计的 harness。Managed Agents 管的是 session 持久、sandbox 隔离、接口稳定——其余的留给 harness 自己决定。
+
+如果把 Managed Agents 放进 Anthropic 过去一年多的动作序列里看，这条线会更清楚：
+
+- 2024 年底，Anthropic 发布 MCP（Model Context Protocol），定义 Agent 连接外部工具和数据源的方式
+- 2025 年 9 月，Claude Code SDK 扩展并更名为 Claude Agent SDK，让开发者可以用 Anthropic 的方式构建自己的 Agent
+- 2025 年 12 月，Anthropic 把 MCP 捐给新成立的 Agentic AI Foundation，尝试把它推向中立行业标准
+- 2026 年 2 月，Xcode 26.3 引入对 Claude Agent SDK 的原生集成，Anthropic 的 Agent 开发方式进入主流 IDE
+- 2026 年 4 月，Managed Agents 发布，把运行环境也托管起来
+
+Anthropic 没有在每一步都喊"我要定义标准"，但方向是清楚的：MCP 标准化 Agent 和工具之间的接口，Agent SDK 提供 Anthropic 版本的 Agent 构建方式，Managed Agents 给出托管运行时抽象。再加上 Skills、Connectors、Marketplace 和 Claude Partner Network——协议、开发、运行、生态，几层同时在走。
+
+商业上有个粗略的类比：AWS 早期用 S3 和 EC2 把"对象存储"和"按需计算实例"变成了云计算的基本词汇。Anthropic 用 Session + Harness + Sandbox 描述 Agent 运行时，是在做类似的事。
+
+三家公司对比只能作为一个粗略框架。它不是三家公司官方策略宣言，也覆盖不了所有产品细节：OpenAI 也有 SDK、CLI 和 IDE 入口，Google 也有完整托管运行时，Anthropic 也在卖托管服务。更准确地说，它们是在相对强调不同的稳定层：
+
+**OpenAI：相对更偏垂直整合。** Codex 是云端软件工程 Agent，任务在 OpenAI 的云沙箱里运行，模型、执行环境和工具链由 OpenAI 统一提供。它的核心倾向是把运行时复杂度收进托管系统里，让开发者关注任务定义、过程监督和结果消费。
+
+**Google：相对更偏平台和互操作协议。** Vertex AI Agent Builder 负责企业级构建、部署和治理，ADK 提供开源的 Agent 开发框架，A2A 协议负责 Agent 之间的发现和协作。它押的是异构未来：多模型、多框架、多组织的 Agent 需要一套通信层。
+
+**Anthropic：相对更偏运行时结构抽象。** Managed Agents 聚焦单个 Agent 内部的运行结构：Session 管记忆，Harness 管驱动，Sandbox 管行动。它在提出一套 Agent 自身应该如何拆分的抽象，关注点和前两家不在同一个层面上。
+
+如果粗略抽象成一张表，可以这样理解：
+
+|           | 更强调稳定的层                                     | 更愿意留给变化的层                         |
+| --------- | -------------------------------------------------- | ------------------------------------------ |
+| OpenAI    | 托管运行体验、模型和工具链协同                     | 任务形态、交互入口、具体工作流             |
+| Google    | 云平台能力和 Agent 间通信协议                      | Agent 框架、模型、部署形态                 |
+| Anthropic | 单个 Agent 的运行时结构（session/harness/sandbox） | 模型能力、harness 实现、hands 的数量和位置 |
+
+Anthropic 的赌注在于：模型能力是变化最快的变量，所以系统的其他部分需要围绕"吸收模型变化"来设计。如果这个判断成立，Session + Harness + Sandbox 这组抽象至少会比某个具体 harness 实现更有生命力。风险也在这里：如果未来 Agent 的运行结构本身发生变化，比如不再需要沙箱，或者 append-only session log 不够用，这组抽象也会过时。
+
+## 五、结语
+
+Managed Agents 有意思的地方，不是它用了什么新技术，而是它对"什么会变、什么不变"做了明确的赌注，然后用经过验证的方法把这个赌注落地了。
+
+接口隔离、状态外置、凭证隔离、松耦合。在 Agent 系统里，这四个决策指向同一件事：基础设施不该被当前模型的能力边界锁死。
+
+Anthropic 原文提到一个经典问题：如何为"尚未被构想出的程序"设计系统。五十年前 UNIX 用 `read()` 和 `write()` 回答了它。Anthropic 用 `execute()`、`getEvents()` 和 `provision()` 给出了自己的版本。这组抽象能活多久，取决于 Agent 的运行结构是否真的像他们赌的那样稳定。
+
+### 参考文章
+
+- [Managed Agents - Anthropic Engineering Blog](https://www.anthropic.com/engineering/managed-agents)
+- [Building Effective Agents - Anthropic](https://www.anthropic.com/engineering/building-effective-agents)
+- [Effective Harnesses for Long-Running Agents - Anthropic](https://www.anthropic.com/engineering/harness-design-long-running-apps)
+- [The Bitter Lesson - Rich Sutton](http://www.incompleteideas.net/IncIdeas/BitterLesson.html)
+- [The History of Pets vs Cattle](https://cloudscaling.com/blog/cloud-computing/the-history-of-pets-vs-cattle/)
+- [The Art of UNIX Programming - Programs as Yet Unthought Of](http://www.catb.org/esr/writings/taoup/html/ch03s01.html)
+- [Building agents with the Claude Agent SDK](https://www.anthropic.com/engineering/building-agents-with-the-claude-agent-sdk/)
+- [Apple's Xcode now supports the Claude Agent SDK](https://www.anthropic.com/news/apple-xcode-claude-agent-sdk)
+- [Donating the Model Context Protocol and establishing the Agentic AI Foundation](https://www.anthropic.com/news/donating-the-model-context-protocol-and-establishing-of-the-agentic-ai-foundation)
+- [Claude Managed Agents - GitHub repositories](https://platform.claude.com/docs/en/managed-agents/github)
+- [Claude Managed Agents - Vaults](https://platform.claude.com/docs/en/managed-agents/vaults)
+- [Introducing Codex - OpenAI](https://openai.com/index/introducing-codex/)
+- [Introducing GPT-5.3-Codex - OpenAI](https://openai.com/index/introducing-gpt-5-3-codex/)
+- [AWS - Our Origins](https://aws.amazon.com/about-aws/our-origins/)
+- [Google Agent Development Kit (ADK)](https://adk.dev/)
+- [Google Agent2Agent (A2A) Protocol](https://github.com/google/A2A)

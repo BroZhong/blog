@@ -98,11 +98,13 @@ export default function ListLayoutWithTags({
           <div className="hidden h-full max-h-screen max-w-[280px] min-w-[280px] flex-wrap overflow-auto rounded-sm bg-gray-50 pt-5 shadow-md sm:flex dark:bg-gray-900/70 dark:shadow-gray-800/40">
             <div className="px-6 py-4">
               {pathname.startsWith('/blog') ? (
-                <h3 className="text-primary-500 font-bold uppercase">全部文章</h3>
+                <h3 className="border-primary-500 border-l-2 py-2 pl-3 font-bold text-gray-900 uppercase dark:text-gray-100">
+                  全部文章
+                </h3>
               ) : (
                 <Link
                   href={`/blog`}
-                  className="hover:text-primary-500 dark:hover:text-primary-500 font-bold text-gray-700 uppercase dark:text-gray-300"
+                  className="block border-l-2 border-transparent py-2 pl-3 font-bold text-gray-700 uppercase transition-colors hover:border-gray-300 hover:text-gray-900 dark:text-gray-300 dark:hover:border-gray-700 dark:hover:text-gray-100"
                 >
                   全部文章
                 </Link>
@@ -112,13 +114,13 @@ export default function ListLayoutWithTags({
                   return (
                     <li key={t} className="my-3">
                       {currentTag === slug(t) ? (
-                        <h3 className="text-primary-500 inline px-3 py-2 text-sm font-bold uppercase">
+                        <h3 className="border-primary-500 block border-l-2 px-3 py-2 text-sm font-bold text-gray-900 uppercase dark:text-gray-100">
                           {`${t} (${tagCounts[t]})`}
                         </h3>
                       ) : (
                         <Link
                           href={`/tags/${slug(t)}`}
-                          className="hover:text-primary-500 dark:hover:text-primary-500 px-3 py-2 text-sm font-medium text-gray-500 uppercase dark:text-gray-300"
+                          className="block border-l-2 border-transparent px-3 py-2 text-sm font-medium text-gray-500 uppercase transition-colors hover:border-gray-300 hover:text-gray-900 dark:text-gray-300 dark:hover:border-gray-700 dark:hover:text-gray-100"
                           aria-label={`View posts tagged ${t}`}
                         >
                           {`${t} (${tagCounts[t]})`}

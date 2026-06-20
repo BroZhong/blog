@@ -1,5 +1,6 @@
 import { Metadata } from 'next'
 import siteMetadata from '@/data/siteMetadata'
+import { resolveAbsoluteImageUrl } from '@/lib/imageUrls'
 
 interface PageSEOProps {
   title: string
@@ -10,6 +11,10 @@ interface PageSEOProps {
 }
 
 export function genPageMetadata({ title, description, image, ...rest }: PageSEOProps): Metadata {
+  const metadataImage = image
+    ? resolveAbsoluteImageUrl(image, siteMetadata.siteUrl)
+    : siteMetadata.socialBanner
+
   return {
     title,
     description: description || siteMetadata.description,
@@ -18,14 +23,14 @@ export function genPageMetadata({ title, description, image, ...rest }: PageSEOP
       description: description || siteMetadata.description,
       url: './',
       siteName: siteMetadata.title,
-      images: image ? [image] : [siteMetadata.socialBanner],
+      images: [metadataImage],
       locale: 'zh_CN',
       type: 'website',
     },
     twitter: {
       title: `${title} | ${siteMetadata.title}`,
       card: 'summary_large_image',
-      images: image ? [image] : [siteMetadata.socialBanner],
+      images: [metadataImage],
     },
     ...rest,
   }

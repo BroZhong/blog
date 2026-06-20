@@ -1,9 +1,20 @@
 import NextImage, { ImageProps } from 'next/image'
+import { resolveImageSrc, shouldBypassVercelImageOptimizer } from '@/lib/imageUrls'
 
-const basePath = process.env.BASE_PATH
+const Image = ({ src, unoptimized, ...rest }: ImageProps) => {
+  if (typeof src !== 'string') {
+    return <NextImage src={src} unoptimized={unoptimized} {...rest} />
+  }
 
-const Image = ({ src, ...rest }: ImageProps) => (
-  <NextImage src={`${basePath || ''}${src}`} {...rest} />
-)
+  const shouldBypassOptimizer = shouldBypassVercelImageOptimizer(src)
+
+  return (
+    <NextImage
+      src={resolveImageSrc(src)}
+      unoptimized={unoptimized ?? (shouldBypassOptimizer ? true : undefined)}
+      {...rest}
+    />
+  )
+}
 
 export default Image

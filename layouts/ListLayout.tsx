@@ -7,6 +7,7 @@ import { CoreContent } from 'pliny/utils/contentlayer'
 import type { Blog } from 'contentlayer/generated'
 import Link from '@/components/Link'
 import Tag from '@/components/Tag'
+import BlogPostCover from '@/components/BlogPostCover'
 import siteMetadata from '@/data/siteMetadata'
 
 interface PaginationProps {
@@ -118,7 +119,7 @@ export default function ListLayout({
         <ul>
           {!filteredBlogPosts.length && '没有找到文章。'}
           {displayPosts.map((post) => {
-            const { path, date, title, summary, tags } = post
+            const { path, date, title, summary, tags, images } = post
             return (
               <li key={path} className="py-4">
                 <article className="space-y-2 xl:grid xl:grid-cols-4 xl:items-baseline xl:space-y-0">
@@ -128,21 +129,29 @@ export default function ListLayout({
                       <time dateTime={date}>{formatDate(date, siteMetadata.locale)}</time>
                     </dd>
                   </dl>
-                  <div className="space-y-3 xl:col-span-3">
-                    <div>
-                      <h3 className="text-2xl leading-8 font-bold tracking-tight">
-                        <Link href={`/${path}`} className="text-gray-900 dark:text-gray-100">
-                          {title}
-                        </Link>
-                      </h3>
-                      <div className="flex flex-wrap">
-                        {tags?.map((tag) => (
-                          <Tag key={tag} text={tag} />
-                        ))}
+                  <div className="grid gap-4 md:grid-cols-[220px_minmax(0,1fr)] xl:col-span-3">
+                    <BlogPostCover
+                      images={images}
+                      title={title}
+                      href={`/${path}`}
+                      className="aspect-[16/9] md:mt-1"
+                    />
+                    <div className="space-y-3">
+                      <div>
+                        <h3 className="text-2xl leading-8 font-bold tracking-tight">
+                          <Link href={`/${path}`} className="text-gray-900 dark:text-gray-100">
+                            {title}
+                          </Link>
+                        </h3>
+                        <div className="flex flex-wrap">
+                          {tags?.map((tag) => (
+                            <Tag key={tag} text={tag} />
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                    <div className="prose max-w-none text-gray-500 dark:text-gray-400">
-                      {summary}
+                      <div className="prose max-w-none text-gray-500 dark:text-gray-400">
+                        {summary}
+                      </div>
                     </div>
                   </div>
                 </article>

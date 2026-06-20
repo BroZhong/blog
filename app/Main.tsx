@@ -1,5 +1,6 @@
 import Link from '@/components/Link'
 import Tag from '@/components/Tag'
+import BlogPostCover from '@/components/BlogPostCover'
 import siteMetadata from '@/data/siteMetadata'
 import { formatDate } from '@/lib/formatDate'
 import NewsletterForm from 'pliny/ui/NewsletterForm'
@@ -31,8 +32,8 @@ export default function Home({ posts }) {
         </div>
         <ul className="divide-y divide-gray-200 dark:divide-gray-700">
           {!posts.length && '还没有文章。'}
-          {posts.slice(0, MAX_DISPLAY).map((post) => {
-            const { slug, date, title, summary, tags } = post
+          {posts.slice(0, MAX_DISPLAY).map((post, index) => {
+            const { slug, date, title, summary, tags, images } = post
             return (
               <li key={slug} className="py-12">
                 <article>
@@ -44,6 +45,12 @@ export default function Home({ posts }) {
                       </dd>
                     </dl>
                     <div className="space-y-5 xl:col-span-3">
+                      <BlogPostCover
+                        images={images}
+                        title={title}
+                        href={`/blog/${slug}`}
+                        priority={index === 0}
+                      />
                       <div className="space-y-6">
                         <div>
                           <h2 className="text-2xl leading-8 font-bold tracking-tight">

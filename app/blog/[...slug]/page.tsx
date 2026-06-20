@@ -13,6 +13,7 @@ import PostBanner from '@/layouts/PostBanner'
 import { Metadata } from 'next'
 import siteMetadata from '@/data/siteMetadata'
 import { notFound } from 'next/navigation'
+import { resolveAbsoluteImageUrl } from '@/lib/imageUrls'
 
 const defaultLayout = 'PostLayout'
 const layouts = {
@@ -43,9 +44,12 @@ export async function generateMetadata(props: {
   if (post.images) {
     imageList = typeof post.images === 'string' ? [post.images] : post.images
   }
-  const ogImages = imageList.map((img) => {
+  const resolvedImageList = imageList.map((img) =>
+    resolveAbsoluteImageUrl(img, siteMetadata.siteUrl)
+  )
+  const ogImages = resolvedImageList.map((img) => {
     return {
-      url: img && img.includes('http') ? img : siteMetadata.siteUrl + img,
+      url: img,
     }
   })
 
@@ -68,7 +72,7 @@ export async function generateMetadata(props: {
       card: 'summary_large_image',
       title: post.title,
       description: post.summary,
-      images: imageList,
+      images: resolvedImageList,
     },
   }
 }
@@ -97,6 +101,11 @@ export default async function Page(props: { params: Promise<{ slug: string[] }> 
   })
   const mainContent = coreContent(post)
   const jsonLd = post.structuredData
+  if (jsonLd.image) {
+    jsonLd.image = Array.isArray(jsonLd.image)
+      ? jsonLd.image.map((image) => resolveAbsoluteImageUrl(image, siteMetadata.siteUrl))
+      : resolveAbsoluteImageUrl(jsonLd.image, siteMetadata.siteUrl)
+  }
   jsonLd['author'] = authorDetails.map((author) => {
     return {
       '@type': 'Person',

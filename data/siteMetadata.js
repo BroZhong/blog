@@ -1,4 +1,11 @@
 /** @type {import("pliny/config").PlinyConfig } */
+const basePath = process.env.BASE_PATH || ''
+const imageBaseUrl = (process.env.NEXT_PUBLIC_IMAGE_BASE_URL || 'https://img.brozhong.com').replace(
+  /\/+$/,
+  ''
+)
+const withImageBase = (path) => `${imageBaseUrl || basePath}${path}`
+
 const siteMetadata = {
   title: 'BroZhong Blog',
   author: 'BroZhong',
@@ -8,8 +15,8 @@ const siteMetadata = {
   theme: 'system', // system, dark or light
   siteUrl: 'https://blog.brozhong.com',
   siteRepo: 'https://github.com/BroZhong/blog',
-  siteLogo: `${process.env.BASE_PATH || ''}/static/images/logo.png`,
-  socialBanner: `${process.env.BASE_PATH || ''}/static/images/twitter-card.png`,
+  siteLogo: withImageBase('/static/images/logo.png'),
+  socialBanner: withImageBase('/static/images/twitter-card.png'),
   mastodon: '',
   email: '',
   github: 'https://github.com/BroZhong',

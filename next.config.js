@@ -56,7 +56,22 @@ const securityHeaders = [
 
 const output = process.env.EXPORT ? 'export' : undefined
 const basePath = process.env.BASE_PATH || undefined
-const unoptimized = process.env.UNOPTIMIZED ? true : undefined
+const imageBaseUrl = (process.env.NEXT_PUBLIC_IMAGE_BASE_URL || 'https://img.brozhong.com').replace(
+  /\/+$/,
+  ''
+)
+const imageBaseRemotePattern = imageBaseUrl
+  ? (() => {
+      const url = new URL(imageBaseUrl)
+      return {
+        protocol: url.protocol.replace(':', ''),
+        hostname: url.hostname,
+        port: url.port,
+        pathname: '/**',
+      }
+    })()
+  : undefined
+const unoptimized = process.env.UNOPTIMIZED || imageBaseUrl ? true : undefined
 
 /**
  * @type {import('next/dist/next-server/server/config').NextConfig}
@@ -84,6 +99,7 @@ module.exports = () => {
           protocol: 'https',
           hostname: 'picsum.photos',
         },
+        ...(imageBaseRemotePattern ? [imageBaseRemotePattern] : []),
       ],
       unoptimized,
     },
